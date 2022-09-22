@@ -1,7 +1,10 @@
+import { EventTypeEntity } from '../../barber-shop/entity/event-type.entity';
 import {
   Column,
   CreateDateColumn,
   Entity,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
@@ -23,6 +26,10 @@ export class UnavailableTimesEntity {
 
   @Column({ name: 'duration_types', enum: TimeDurationType, type: 'enum' })
   durationType: TimeDurationType;
+
+  @ManyToOne(() => EventTypeEntity, (event) => event.eventConfig)
+  @JoinColumn({ name: 'event_type_id' })
+  eventType: EventTypeEntity;
 
   @CreateDateColumn({ name: 'created_date' })
   createdDate: Date;

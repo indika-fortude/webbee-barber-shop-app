@@ -1,4 +1,11 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseIntPipe,
+  Post,
+} from '@nestjs/common';
 import { AppoinmentDto } from './dto/appoinment.dto';
 import { UserAppoinmentService } from './user-appoinment.service';
 
@@ -11,8 +18,10 @@ export class UserAppoinmentController {
     return this.userAppoinmentService.createUserAppoinement(appoinment);
   }
 
-  @Get('scheduled')
-  async getAllScheduleEvents() {
-    return this.userAppoinmentService.getAllScheduleEvents();
+  @Get('scheduled/event-id/:id')
+  async getAllScheduleEventsForEvent(
+    @Param('id', ParseIntPipe) eventId: number,
+  ) {
+    return this.userAppoinmentService.getAllScheduleEventsForEvent(eventId);
   }
 }

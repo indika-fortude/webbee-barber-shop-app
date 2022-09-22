@@ -9,26 +9,28 @@ import {
   Put,
 } from '@nestjs/common';
 import { BarberShopConfigService } from './barber-shop-config.service';
-import { GlobalConfigDto } from './dto/global-config.dto';
+import { EventConfigDto } from './dto/event-config.dto';
 import { UnavaialbleTimesDto } from './dto/unavailable-time.dto';
 
 @Controller('barber-shop-config')
 export class BarberShopConfigController {
   constructor(private barberShopConfigService: BarberShopConfigService) {}
 
-  @Get()
-  async getLatesConfiguration() {
-    return this.barberShopConfigService.getLatestConfig();
+  @Get('event-type/:id')
+  async getLatesConfiguration(@Param('id', ParseIntPipe) eventId: number) {
+    return this.barberShopConfigService.getLatestConfig(eventId);
   }
 
   @Post()
-  async createNewConfig(@Body() configBody: GlobalConfigDto) {
-    return this.barberShopConfigService.updateNewConfig(configBody);
+  async createNewConfig(@Body() configBody: EventConfigDto) {
+    return this.barberShopConfigService.updateNewEventConfig(configBody);
   }
 
-  @Get('unavalable-time')
-  async getAllUnavailableDates() {
-    return this.barberShopConfigService.getAllUnavailableTimes();
+  @Get('unavalable-time/event-type/:eventId')
+  async getAllUnavailableDates(
+    @Param('eventId', ParseIntPipe) eventId: number,
+  ) {
+    return this.barberShopConfigService.getAllUnavailableTimes(eventId);
   }
 
   @Post('unavalable-time')

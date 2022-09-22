@@ -1,21 +1,22 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { EventTypeEntity } from '../barber-shop/entity/event-type.entity';
 import { Repository } from 'typeorm';
 import { BarberShopConfigService } from './barber-shop-config.service';
 import CacheService from './cache.service';
-import { GlobalConfigEntity } from './entity/global-config.entity';
+import { EventConfigEntity } from './entity/event-config.entity';
 import { UnavailableTimesEntity } from './entity/unavailable-times.entity';
 
 describe('BarberShopConfigService', () => {
   let service: BarberShopConfigService;
-  let globalConfigRepo: Repository<GlobalConfigEntity>;
+  let eventConfigRepo: Repository<EventConfigEntity>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         BarberShopConfigService,
         {
-          provide: getRepositoryToken(GlobalConfigEntity),
+          provide: getRepositoryToken(EventConfigEntity),
           useValue: {
             find: jest.fn(),
             create: jest.fn(),
@@ -31,6 +32,12 @@ describe('BarberShopConfigService', () => {
           },
         },
         {
+          provide: getRepositoryToken(EventTypeEntity),
+          useValue: {
+            findOne: jest.fn(),
+          },
+        },
+        {
           provide: CacheService,
           useValue: {
             invalidateCache: jest.fn(),
@@ -40,8 +47,8 @@ describe('BarberShopConfigService', () => {
     }).compile();
 
     service = module.get<BarberShopConfigService>(BarberShopConfigService);
-    globalConfigRepo = module.get<Repository<GlobalConfigEntity>>(
-      getRepositoryToken(GlobalConfigEntity),
+    eventConfigRepo = module.get<Repository<EventConfigEntity>>(
+      getRepositoryToken(EventConfigEntity),
     );
   });
 
@@ -51,10 +58,10 @@ describe('BarberShopConfigService', () => {
 
   it('it should test getLatestConfig', async () => {
     const spy = jest
-      .spyOn(globalConfigRepo, 'find')
-      .mockImplementation(async () => [new GlobalConfigEntity()]);
+      .spyOn(eventConfigRepo, 'find')
+      .mockImplementation(async () => [new EventConfigEntity()]);
 
-    await service.getLatestConfig();
+    await service.getLatestConfig(1);
     expect(spy).toBeCalled();
   });
 });

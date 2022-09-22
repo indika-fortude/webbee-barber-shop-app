@@ -1,4 +1,4 @@
-import { IsDate, IsEnum, IsOptional, Matches } from 'class-validator';
+import { IsEnum, Matches, Min } from 'class-validator';
 import { TimeDurationType } from '../enum/time-duration-type.enum';
 
 export class UnavaialbleTimesDto {
@@ -12,4 +12,7 @@ export class UnavaialbleTimesDto {
 
   @IsEnum(TimeDurationType)
   durationType: TimeDurationType;
+
+  @Min(1)
+  eventId: number;
 }

@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { EventConfigEntity } from '../barber-shop-config/entity/event-config.entity';
 import CacheService from '../barber-shop-config/cache.service';
-import { GlobalConfigEntity } from '../barber-shop-config/entity/global-config.entity';
 import { UnavailableTimesEntity } from '../barber-shop-config/entity/unavailable-times.entity';
 import { EventTypeEntity } from '../barber-shop/entity/event-type.entity';
 import { AppoinmentEntity } from './entity/appoinment.entity';
@@ -15,7 +15,7 @@ import { UserAppoinmentService } from './user-appoinment.service';
       UserEntity,
       EventTypeEntity,
       AppoinmentEntity,
-      GlobalConfigEntity,
+      EventConfigEntity,
       UnavailableTimesEntity,
     ]),
   ],

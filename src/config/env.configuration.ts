@@ -8,7 +8,7 @@ export default () => ({
     database: process.env.DB_NAME,
     schema: process.env.DB_SCHEMA,
     entities: [__dirname + '/../**/*.entity{.ts,.js}'],
-    synchronize: true,
+    synchronize: false,
     ssl: {
       rejectUnauthorized: false,
     },

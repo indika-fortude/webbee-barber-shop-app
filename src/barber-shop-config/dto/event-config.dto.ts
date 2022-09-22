@@ -1,6 +1,6 @@
 import { Min } from 'class-validator';
 
-export class GlobalConfigDto {
+export class EventConfigDto {
   @Min(1)
   maxParallelClients: number;
   @Min(1)
@@ -8,5 +8,7 @@ export class GlobalConfigDto {
   @Min(1)
   breakBetweenAppoinmentInMinute: number;
   @Min(1)
-  maximumOppinmentDates: number;
+  maximumAppinmentDates: number;
+  @Min(1)
+  eventId: number;
 }

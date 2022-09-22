@@ -1,4 +1,4 @@
-import { EventTypeEntity } from 'src/barber-shop/entity/event-type.entity';
+import { EventTypeEntity } from '../../barber-shop/entity/event-type.entity';
 import {
   Column,
   CreateDateColumn,

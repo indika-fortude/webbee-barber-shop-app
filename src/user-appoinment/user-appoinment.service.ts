@@ -1,19 +1,28 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import CacheService from 'src/barber-shop-config/cache.service';
-import { GlobalConfigEntity } from 'src/barber-shop-config/entity/global-config.entity';
-import { UnavailableTimesEntity } from 'src/barber-shop-config/entity/unavailable-times.entity';
-import { RedisKey } from 'src/barber-shop-config/enum/redis-key.enum';
-import { EventTypeEntity } from 'src/barber-shop/entity/event-type.entity';
+import CacheService from '../barber-shop-config/cache.service';
+import { UnavailableTimesEntity } from '../barber-shop-config/entity/unavailable-times.entity';
+import { RedisKey } from '../barber-shop-config/enum/redis-key.enum';
+import { EventTypeEntity } from '../barber-shop/entity/event-type.entity';
 import { Equal, LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
 import { AppoinmentDto } from './dto/appoinment.dto';
 import { AppoinmentEntity } from './entity/appoinment.entity';
 import { UserEntity } from './entity/user.entity';
 import * as moment from 'moment';
 import { extendMoment } from 'moment-range';
-import { TimeDurationType } from 'src/barber-shop-config/enum/time-duration-type.enum';
+import { TimeDurationType } from '../barber-shop-config/enum/time-duration-type.enum';
 import { ScheduledEventsDto } from './dto/scheduled-event.dto';
-
+import { EventConfigEntity } from '../barber-shop-config/entity/event-config.entity';
+import {
+  addDays,
+  areIntervalsOverlapping,
+  compareAsc,
+  differenceInMinutes,
+  getDay,
+} from 'date-fns';
+//over book events
+//change global configuration for the specific event type
+//validation for pre-unavailable dates do not work
 @Injectable()
 export class UserAppoinmentService {
   private logger = new Logger(UserAppoinmentService.name);
@@ -24,22 +33,25 @@ export class UserAppoinmentService {
     private userRepo: Repository<UserEntity>,
     @InjectRepository(EventTypeEntity)
     private eventTypeRepo: Repository<EventTypeEntity>,
-    @InjectRepository(GlobalConfigEntity)
-    private globalConfigRepo: Repository<GlobalConfigEntity>,
+    @InjectRepository(EventConfigEntity)
+    private eventConfigRepo: Repository<EventConfigEntity>,
     @InjectRepository(UnavailableTimesEntity)
     private unavailableTimeRepo: Repository<UnavailableTimesEntity>,
     private cacheService: CacheService,
   ) {}
 
   async createUserAppoinement(appoinment: AppoinmentDto) {
+    const eventId = appoinment.eventType.id;
     this.validateTimeBetween(appoinment.startTime, appoinment.endTime);
     await this.validateSelectedTimesInMaxRange(
       appoinment.startTime,
       appoinment.endTime,
+      eventId,
     );
     await this.validateDateRangeInWorkingHours(
       appoinment.startTime,
       appoinment.endTime,
+      eventId,
     );
 
     const eventType =
@@ -50,9 +62,15 @@ export class UserAppoinmentService {
       );
     appoinment.eventType = eventType;
 
-    await this.validateAppoinmentSlotsFilledOrInvalid(
+    await this.validateAppoinmentSlotsOverLapTwoSlots(
+      appoinment.startTime,
+      eventId,
+    );
+
+    await this.validateNumberOfEventsInATimeSlot(
       appoinment.startTime,
       appoinment.endTime,
+      eventId,
     );
 
     const user = await this.getUser(appoinment.user.email);
@@ -64,11 +82,11 @@ export class UserAppoinmentService {
     return this.appoinmentRepo.save(appoinmentEntity);
   }
 
-  async getAllScheduleEvents() {
-    const globalConfig = await this.getGlobalConfig();
+  async getAllScheduleEventsForEvent(eventId: number) {
+    const globalConfig = await this.getEventConfig(eventId);
     const currentTimestamp = new Date();
     const currentLastDayForAppoinment = moment()
-      .add(globalConfig.maximumOppinmentDates, 'day')
+      .add(globalConfig.maximumAppinmentDates, 'day')
       .toDate();
 
     const appoinements = await this.appoinmentRepo.find({
@@ -208,7 +226,7 @@ export class UserAppoinmentService {
       lastName: event.user?.lastNname,
       startTime: event.startTime,
       endTime: event.endTime,
-      eventType: event.eventType?.eventType,
+      eventType: event.eventType?.eventTypeName,
       gender: event.user?.gender,
       maximumPeopleCanBookEvent: maxParallelBookings,
       availableQuantity: 0,
@@ -239,26 +257,34 @@ export class UserAppoinmentService {
   /**
    * This method validate our selected time range is not belongs to a unavailable time range.
    */
-  async validateDateRangeInWorkingHours(startTime: Date, endTime: Date) {
-    const definedUnavailTimes = await this.getUnavailableTimes();
+  async validateDateRangeInWorkingHours(
+    startTime: Date,
+    endTime: Date,
+    eventId: number,
+  ) {
+    const definedUnavailTimes = await this.getUnavailableTimes(eventId);
     const unavailableDaysOfSelectedDay =
       this.filterTheUnavailableTimesBelongsToSelectedDay(
         definedUnavailTimes,
         startTime,
       );
 
-    const exMoment = extendMoment(moment);
-
     const overLapIntervals = unavailableDaysOfSelectedDay.filter((t) => {
-      const todayDate = new Date(startTime).toISOString().slice(0, 10);
-      const unavailFrom = moment(todayDate.concat(' ').concat(t.startTime));
-      const unavailTo = moment(todayDate.concat(' ').concat(t.endTime));
-      const rangeOne = exMoment.range(unavailFrom, unavailTo);
-      const rangeTwo = exMoment.range(startTime, endTime);
-      return rangeOne.overlaps(rangeTwo);
+      const selectedDateStr = new Date(startTime).toLocaleDateString();
+      const unavailFrom = new Date(
+        selectedDateStr.concat(' ').concat(t.startTime),
+      );
+      const unavailTo = new Date(selectedDateStr.concat(' ').concat(t.endTime));
+      return areIntervalsOverlapping(
+        { start: unavailFrom, end: unavailTo },
+        { start: startTime, end: endTime },
+      );
     });
 
     if (overLapIntervals.length > 0) {
+      this.logger.error(
+        `appoinment date is in unavailable range: startTime: ${startTime}, endTime: ${endTime}, eventID: ${eventId}`,
+      );
       throw new HttpException(
         {
           message: ['appoinment date is in unavailable range'],
@@ -287,12 +313,12 @@ export class UserAppoinmentService {
       'saterday',
     ];
 
-    const currentDay = days[moment(selectedDate).day()];
+    const selectedDay = days[getDay(selectedDate)];
     return unavaialbleTimes.filter((t) => {
       const unAvailDate = t.date && new Date(t.date).setUTCHours(0, 0, 0, 0);
       const currentDate = new Date().setUTCHours(0, 0, 0, 0);
       return (
-        t.durationType === currentDay ||
+        t.durationType === selectedDay ||
         t.durationType === TimeDurationType.ALL_DAYS ||
         (t.durationType === TimeDurationType.ONE_DAY &&
           unAvailDate === currentDate)
@@ -304,11 +330,16 @@ export class UserAppoinmentService {
    * This method validate that the start and end time is not old time of
    * day after maximum time allowed user to book a event.
    */
-  async validateSelectedTimesInMaxRange(startTime: Date, endTime: Date) {
-    const globalConfig = await this.getGlobalConfig();
-    const maximumApponmentDate = moment()
-      .add(globalConfig.maximumOppinmentDates, 'day')
-      .toDate();
+  async validateSelectedTimesInMaxRange(
+    startTime: Date,
+    endTime: Date,
+    eventId: number,
+  ) {
+    const globalConfig = await this.getEventConfig(eventId);
+    const maximumApponmentDate = addDays(
+      Date.now(),
+      globalConfig.maximumAppinmentDates,
+    );
     const currentDate = new Date();
 
     if (
@@ -337,11 +368,9 @@ export class UserAppoinmentService {
     startTime: Date,
     endTime: Date,
   ) {
-    const eventTypes = await this.getEventTypes();
-    const selectedEventType = eventTypes.filter(
-      (ev) => ev.id == eventTypeId,
-    )[0];
-    if (!selectedEventType) {
+    const eventType = await this.getEventType(eventTypeId);
+
+    if (!eventType) {
       throw new HttpException(
         {
           message: [`event type not found for id: ${eventTypeId} `],
@@ -352,8 +381,9 @@ export class UserAppoinmentService {
       );
     }
 
-    const timeDiff = moment(endTime).diff(startTime, 'minute');
-    if (timeDiff != selectedEventType.timeTakenInMinute) {
+    const timeDiff = differenceInMinutes(endTime, startTime);
+    const { slotLengthInMunute } = eventType.eventConfig;
+    if (timeDiff != slotLengthInMunute) {
       throw new HttpException(
         {
           message: [`event start end end time does not match to event time`],
@@ -363,7 +393,7 @@ export class UserAppoinmentService {
         HttpStatus.BAD_REQUEST,
       );
     }
-    return selectedEventType;
+    return eventType;
   }
 
   /**
@@ -371,25 +401,42 @@ export class UserAppoinmentService {
    * And validate current selected time slot do have maximum number of events.
    * And validate between privious and selected slot have a configured amount of break.
    */
-  async validateAppoinmentSlotsFilledOrInvalid(startTime: Date, endTime: Date) {
-    const globalConfig = await this.getGlobalConfig();
-    const midNigthTime = new Date(startTime).setUTCHours(0, 0, 0, 0);
-    const startTimeFromMidNigthInMinute = moment(startTime).diff(
-      midNigthTime,
-      'minute',
+  async validateAppoinmentSlotsOverLapTwoSlots(
+    startTime: Date,
+    eventId: number,
+  ) {
+    const eventConfig = await this.getEventConfig(eventId);
+    const definedUnavailTimes = await this.getUnavailableTimes(eventId);
+    const unavailableDaysOfSelectedDay =
+      this.filterTheUnavailableTimesBelongsToSelectedDay(
+        definedUnavailTimes,
+        startTime,
+      );
+
+    const selectedDateStr = new Date(startTime).toLocaleDateString();
+    const unavailableEndTimes = unavailableDaysOfSelectedDay.map(
+      (unavailTime) =>
+        new Date(selectedDateStr.concat(' ').concat(unavailTime.endTime)),
     );
 
-    const minuteRemanderWithSlotLength =
-      startTimeFromMidNigthInMinute % globalConfig.slotLengthInMunute;
+    const nearestUnavailableEndTime = this.findNearestDateOfDates(
+      unavailableEndTimes,
+      startTime,
+    );
 
-    const minuteRemanderWithSlotBreakLength =
-      startTimeFromMidNigthInMinute %
-      globalConfig.breakBetweenAppoinmentInMinute;
+    const timeBetweenNearestUnavailAndStartTime = differenceInMinutes(
+      startTime,
+      nearestUnavailableEndTime,
+    );
 
-    if (
-      minuteRemanderWithSlotLength > 0 &&
-      minuteRemanderWithSlotBreakLength > 0
-    ) {
+    const timeBetweenTwoSlotInMinute =
+      eventConfig.slotLengthInMunute +
+      eventConfig.breakBetweenAppoinmentInMinute;
+
+    const minuteRemanderWithSlotLengths =
+      timeBetweenNearestUnavailAndStartTime % timeBetweenTwoSlotInMinute;
+
+    if (minuteRemanderWithSlotLengths > 0) {
       throw new HttpException(
         {
           message: [`invalid start time, not in correct time slot`],
@@ -399,15 +446,40 @@ export class UserAppoinmentService {
         HttpStatus.BAD_REQUEST,
       );
     }
+  }
+
+  findNearestDateOfDates(dates: Date[], comparativeDate: Date) {
+    const sortedDates = dates.sort(compareAsc);
+    let dateDiffInMinute = Infinity;
+    let lastNearestDate: Date = null;
+    for (const date of sortedDates) {
+      const timeDiff = differenceInMinutes(comparativeDate, date);
+      if (timeDiff >= 0 && dateDiffInMinute > timeDiff) {
+        dateDiffInMinute = timeDiff;
+        lastNearestDate = date;
+      } else if (timeDiff < 0) {
+        return lastNearestDate;
+      }
+    }
+    return lastNearestDate;
+  }
+
+  async validateNumberOfEventsInATimeSlot(
+    startTime: Date,
+    endTime: Date,
+    eventId: number,
+  ) {
+    const eventConfig = await this.getEventConfig(eventId);
 
     const currentAvailableAppoinments = await this.appoinmentRepo.find({
       where: {
-        startTime: MoreThanOrEqual(startTime),
-        endTime: LessThanOrEqual(endTime),
+        startTime: Equal(startTime),
+        endTime: Equal(endTime),
+        eventType: { id: eventId },
       },
     });
 
-    if (currentAvailableAppoinments.length > globalConfig.maxParallelClients) {
+    if (currentAvailableAppoinments.length > eventConfig.maxParallelClients) {
       throw new HttpException(
         {
           message: [`maximum appoinemts are filled for this slot`],
@@ -417,47 +489,28 @@ export class UserAppoinmentService {
         HttpStatus.BAD_REQUEST,
       );
     }
-
-    const previousSlotAvailability = await this.appoinmentRepo.find({
-      where: {
-        endTime: Equal(startTime),
-      },
-    });
-
-    if (previousSlotAvailability.length > 0) {
-      throw new HttpException(
-        {
-          message: [`appoinement cannot be placed. invalid slot`],
-          error: 'Bad Request',
-          statusCode: HttpStatus.BAD_REQUEST,
-        },
-        HttpStatus.BAD_REQUEST,
-      );
-    }
   }
 
-  private async getGlobalConfig() {
+  private async getEventConfig(eventId: number) {
     //read from cache
-    const globalConfig = await this.cacheService.readFromCache(
-      RedisKey.GLOBAL_CONFIG_KEY,
+    const eventConfig = await this.cacheService.readFromCache(
+      RedisKey.EVENT_CONFIG_KEY.concat(eventId.toString()),
     );
 
-    if (globalConfig) {
-      return JSON.parse(globalConfig) as GlobalConfigEntity;
+    if (eventConfig) {
+      return JSON.parse(eventConfig) as EventConfigEntity;
     }
 
-    const configResult = await this.globalConfigRepo.find({
-      take: 1,
+    const eventConfigValues = await this.eventConfigRepo.findOne({
+      where: { eventType: { id: eventId } },
     });
 
-    const globalConfigValues = configResult[0];
-
-    if (globalConfigValues) {
+    if (eventConfigValues) {
       await this.cacheService.addStringToCache(
-        RedisKey.GLOBAL_CONFIG_KEY,
-        JSON.stringify(globalConfigValues),
+        RedisKey.EVENT_CONFIG_KEY.concat(eventId.toString()),
+        JSON.stringify(eventConfigValues),
       );
-      return globalConfigValues;
+      return eventConfigValues;
     } else {
       this.logger.error('global configuration object not found');
       throw new HttpException(
@@ -471,44 +524,49 @@ export class UserAppoinmentService {
     }
   }
 
-  private async getUnavailableTimes() {
+  private async getUnavailableTimes(eventId: number) {
     //read from cache
     const unavailableTimesFromCache = await this.cacheService.readFromCache(
-      RedisKey.UNAVAILABLE_TIME_KEY,
+      RedisKey.UNAVAILABLE_TIME_KEY.concat(eventId.toString()),
     );
 
     if (unavailableTimesFromCache) {
       return JSON.parse(unavailableTimesFromCache) as UnavailableTimesEntity[];
     }
 
-    const unavaialbleTimes = await this.unavailableTimeRepo.find();
+    const unavaialbleTimes = await this.unavailableTimeRepo.find({
+      where: { eventType: { id: eventId } },
+    });
     if (unavaialbleTimes.length > 0) {
       await this.cacheService.addStringToCache(
-        RedisKey.UNAVAILABLE_TIME_KEY,
+        RedisKey.UNAVAILABLE_TIME_KEY.concat(eventId.toString()),
         JSON.stringify(unavaialbleTimes),
       );
     }
     return unavaialbleTimes;
   }
 
-  private async getEventTypes() {
+  private async getEventType(eventId: number) {
     //read from cache
     const eventTypesFromCache = await this.cacheService.readFromCache(
-      RedisKey.EVENT_TYPE_KEY,
+      RedisKey.EVENT_TYPE_KEY.concat(eventId.toString()),
     );
 
     if (eventTypesFromCache) {
-      return JSON.parse(eventTypesFromCache) as EventTypeEntity[];
+      return JSON.parse(eventTypesFromCache) as EventTypeEntity;
     }
 
-    const eventTypes = await this.eventTypeRepo.find();
-    if (eventTypes.length > 0) {
+    const eventType = await this.eventTypeRepo.findOne({
+      where: { id: eventId },
+      relations: ['eventConfig'],
+    });
+    if (eventType) {
       await this.cacheService.addStringToCache(
-        RedisKey.EVENT_TYPE_KEY,
-        JSON.stringify(eventTypes),
+        RedisKey.EVENT_TYPE_KEY.concat(eventId.toString()),
+        JSON.stringify(eventType),
       );
     }
-    return eventTypes;
+    return eventType;
   }
 
   private flattenArray<T>(array: Array<Array<T>>): Array<T> {
