@@ -250,7 +250,7 @@ export class UserAppoinmentService {
     const exMoment = extendMoment(moment);
 
     const overLapIntervals = unavailableDaysOfSelectedDay.filter((t) => {
-      const todayDate = new Date().toISOString().slice(0, 10);
+      const todayDate = new Date(startTime).toISOString().slice(0, 10);
       const unavailFrom = moment(todayDate.concat(' ').concat(t.startTime));
       const unavailTo = moment(todayDate.concat(' ').concat(t.endTime));
       const rangeOne = exMoment.range(unavailFrom, unavailTo);
@@ -373,7 +373,7 @@ export class UserAppoinmentService {
    */
   async validateAppoinmentSlotsFilledOrInvalid(startTime: Date, endTime: Date) {
     const globalConfig = await this.getGlobalConfig();
-    const midNigthTime = new Date().setUTCHours(0, 0, 0, 0);
+    const midNigthTime = new Date(startTime).setUTCHours(0, 0, 0, 0);
     const startTimeFromMidNigthInMinute = moment(startTime).diff(
       midNigthTime,
       'minute',
