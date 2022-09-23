@@ -24,4 +24,11 @@ export class UserAppoinmentController {
   ) {
     return this.userAppoinmentService.getAllScheduleEventsForEvent(eventId);
   }
+
+  @Get('available-slot/event-id/:id')
+  async getAllAvailableSlotsForEvents(
+    @Param('id', ParseIntPipe) eventId: number,
+  ) {
+    return this.userAppoinmentService.getAllAvailableSlotsForEvents(eventId);
+  }
 }

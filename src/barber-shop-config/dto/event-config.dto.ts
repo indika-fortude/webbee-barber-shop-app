@@ -8,7 +8,7 @@ export class EventConfigDto {
   @Min(1)
   breakBetweenAppoinmentInMinute: number;
   @Min(1)
-  maximumAppinmentDates: number;
+  maximumAppoinmentDates: number;
   @Min(1)
   eventId: number;
 }

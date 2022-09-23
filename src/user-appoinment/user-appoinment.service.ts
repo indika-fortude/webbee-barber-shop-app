@@ -9,17 +9,20 @@ import { AppoinmentDto } from './dto/appoinment.dto';
 import { AppoinmentEntity } from './entity/appoinment.entity';
 import { UserEntity } from './entity/user.entity';
 import * as moment from 'moment';
-import { extendMoment } from 'moment-range';
-import { TimeDurationType } from '../barber-shop-config/enum/time-duration-type.enum';
 import { ScheduledEventsDto } from './dto/scheduled-event.dto';
 import { EventConfigEntity } from '../barber-shop-config/entity/event-config.entity';
 import {
   addDays,
+  addMinutes,
+  addSeconds,
   areIntervalsOverlapping,
   compareAsc,
   differenceInMinutes,
+  endOfDay,
   getDay,
 } from 'date-fns';
+import { TimeRange } from './types/time-range.type';
+import { TimeDurationType } from 'src/barber-shop-config/enum/time-duration-type.enum';
 //over book events
 //change global configuration for the specific event type
 //validation for pre-unavailable dates do not work
@@ -40,6 +43,9 @@ export class UserAppoinmentService {
     private cacheService: CacheService,
   ) {}
 
+  /**
+   * create new appoinment for a selected event
+   */
   async createUserAppoinement(appoinment: AppoinmentDto) {
     const eventId = appoinment.eventType.id;
     this.validateTimeBetween(appoinment.startTime, appoinment.endTime);
@@ -82,105 +88,257 @@ export class UserAppoinmentService {
     return this.appoinmentRepo.save(appoinmentEntity);
   }
 
+  /**
+   * Return All the avalable time slots for a event id,
+   * Time slot will be provided for configured time period.
+   */
+  async getAllAvailableSlotsForEvents(eventId: number) {
+    const eventConfig = await this.getEventConfig(eventId);
+
+    const dateRangesTillMaxDate =
+      this.getDateRangesFromCurrentToDefinedLengthOfDays(
+        eventConfig.maximumAppoinmentDates,
+      );
+
+    const availableRangesPms = dateRangesTillMaxDate.map((timeRange) =>
+      this.getAppoinmentTimeSlotsByRemovingUnavailableTimes(
+        timeRange,
+        eventConfig.slotLengthInMunute,
+        eventConfig.breakBetweenAppoinmentInMinute,
+        eventConfig.maxParallelClients,
+        eventId,
+      ),
+    );
+
+    const availableRangesArr = await Promise.all(availableRangesPms);
+    const availableRanges = this.flattenArray(availableRangesArr);
+
+    const availableTimeSlots =
+      await this.reduceAvailabiltyCountForAlreadyAssignSlots(
+        eventId,
+        availableRanges,
+      );
+
+    return availableTimeSlots.map((i) => ({
+      ...i,
+      startTime: i.startTime.toLocaleString(),
+      endTime: i.endTime.toLocaleString(),
+    }));
+  }
+
+  getDateRangesFromCurrentToDefinedLengthOfDays(
+    maximumNumOfDays: number,
+  ): TimeRange[] {
+    const dateRanges = [];
+    const lastAppoinmentDate = addDays(Date.now(), maximumNumOfDays);
+    let startTime = new Date();
+    while (startTime < lastAppoinmentDate) {
+      const endDateForTheDay = endOfDay(startTime);
+      const dayEndDate =
+        endDateForTheDay > lastAppoinmentDate
+          ? lastAppoinmentDate
+          : endDateForTheDay;
+      dateRanges.push({ startTime: startTime, endTime: dayEndDate });
+      startTime = addSeconds(endOfDay(startTime), 1);
+    }
+    return dateRanges;
+  }
+
+  async getAppoinmentTimeSlotsByRemovingUnavailableTimes(
+    timeRangeToSplit: TimeRange,
+    slotLengthInMin: number,
+    breakTimeInMin: number,
+    maxParallelSlots: number,
+    eventId: number,
+  ): Promise<TimeRange[]> {
+    const definedUnavailTimes = await this.getUnavailableTimes(eventId);
+    const unavailableDaysOfSelectedDay =
+      this.filterTheUnavailableTimesBelongsToSelectedDay(
+        definedUnavailTimes,
+        timeRangeToSplit.startTime,
+      );
+
+    const nonOverLapUnavailDays = this.findOverlapsOnUnavailableTimes(
+      unavailableDaysOfSelectedDay,
+      timeRangeToSplit.startTime,
+    );
+
+    const unavailableEndTimes = nonOverLapUnavailDays.map(
+      (unavailTime) => new Date(unavailTime.endTime),
+    );
+    const nearestUnavailableEndTime = this.findNearestDateOfDates(
+      unavailableEndTimes,
+      timeRangeToSplit.startTime,
+    );
+
+    let slotStartTime =
+      nearestUnavailableEndTime > timeRangeToSplit.startTime
+        ? nearestUnavailableEndTime
+        : this.getTheNearestPossibleTimeSlotStartTime(
+            timeRangeToSplit.startTime,
+            nearestUnavailableEndTime,
+            slotLengthInMin,
+            breakTimeInMin,
+          );
+
+    nonOverLapUnavailDays.sort((t1, t2) =>
+      compareAsc(t1.startTime, t2.startTime),
+    );
+
+    //this is becouse earlier start date is filters so here no need to consider is again.
+    nonOverLapUnavailDays.shift();
+    const timeSlots = [];
+
+    let fistUnavailElement = nonOverLapUnavailDays.shift();
+    if (!fistUnavailElement) return timeSlots;
+
+    while (slotStartTime < timeRangeToSplit.endTime) {
+      const slotEndTime = addMinutes(slotStartTime, slotLengthInMin);
+      const slotEndWithBreak = addMinutes(
+        slotStartTime,
+        slotLengthInMin + breakTimeInMin,
+      );
+      if (
+        fistUnavailElement.startTime > slotStartTime &&
+        fistUnavailElement.startTime >= slotEndWithBreak
+      ) {
+        timeSlots.push({
+          startTime: slotStartTime,
+          endTime: slotEndTime,
+          maxAvailableSlots: maxParallelSlots,
+          currentAvailableSlots: maxParallelSlots,
+        });
+        slotStartTime = slotEndWithBreak;
+      } else {
+        slotStartTime = fistUnavailElement.endTime;
+        fistUnavailElement = nonOverLapUnavailDays.shift();
+        if (!fistUnavailElement) {
+          fistUnavailElement = {
+            startTime: timeRangeToSplit.endTime,
+            endTime: timeRangeToSplit.endTime,
+          };
+        }
+      }
+    }
+
+    return timeSlots;
+  }
+
+  async reduceAvailabiltyCountForAlreadyAssignSlots(
+    eventId: number,
+    availableSlots: TimeRange[],
+  ) {
+    const appoinements = await this.getAllScheduleEventsForEvent(eventId);
+
+    if (appoinements.length == 0) {
+      return availableSlots;
+    }
+
+    const appoinementsDates = appoinements.map((appoinment) => ({
+      ...appoinment,
+      startTime: new Date(appoinment.startTime),
+      endTime: new Date(appoinment.endTime),
+    }));
+    appoinementsDates.sort((t1, t2) => compareAsc(t1.startTime, t2.startTime));
+    availableSlots.sort((t1, t2) => compareAsc(t1.startTime, t2.startTime));
+
+    let nextAppoinment = appoinementsDates.shift();
+
+    for (const slots of availableSlots) {
+      if (nextAppoinment.startTime.getTime() === slots.startTime.getTime()) {
+        slots.currentAvailableSlots -= nextAppoinment.countPerSlot;
+        nextAppoinment = appoinementsDates.shift();
+      }
+
+      if (!nextAppoinment) {
+        return availableSlots;
+      }
+    }
+  }
+
+  getTheNearestPossibleTimeSlotStartTime(
+    startTime: Date,
+    shopOpeningTime: Date,
+    slotLengthInMin: number,
+    intervalTimeInMin: number,
+  ) {
+    const diffInMinute = differenceInMinutes(startTime, shopOpeningTime);
+    const totalTimeWithBreak = slotLengthInMin + intervalTimeInMin;
+    const remainderOfMinute = diffInMinute % totalTimeWithBreak;
+    if (remainderOfMinute > 0) {
+      const newStartTimeSlot = addMinutes(
+        startTime,
+        totalTimeWithBreak - remainderOfMinute,
+      );
+      return new Date(newStartTimeSlot.setSeconds(0, 0));
+    }
+    return new Date(startTime.setSeconds(0, 0));
+  }
+
+  /**
+   * This method returns all the scheduled appoinments in slot wise.
+   * startTime and endTime of each object would be in format of local string.
+   */
   async getAllScheduleEventsForEvent(eventId: number) {
     const globalConfig = await this.getEventConfig(eventId);
-    const currentTimestamp = new Date();
-    const currentLastDayForAppoinment = moment()
-      .add(globalConfig.maximumAppinmentDates, 'day')
-      .toDate();
 
-    const appoinements = await this.appoinmentRepo.find({
-      where: {
-        startTime: MoreThanOrEqual(currentTimestamp),
-        endTime: LessThanOrEqual(currentLastDayForAppoinment),
-      },
-      relations: ['user', 'eventType'],
-    });
-
-    const scheduledEvents = this.getScheduledEventsFormat(
-      appoinements,
-      globalConfig.maxParallelClients,
+    const appoinements = await this.getAllAppoinmentInMaximumTimeRange(
+      globalConfig.maximumAppoinmentDates,
+      eventId,
+      new Date(),
     );
 
-    const splitedScheduledEvent = this.splitEventsIntoSlotLengths(
-      scheduledEvents,
-      globalConfig.slotLengthInMunute,
-    );
+    const scheduledEvents = this.getScheduledEventsFormat(appoinements);
 
-    const scheduleEventWithCount = this.countEqualAmountOfTimeRanges(
-      splitedScheduledEvent,
-    );
+    const eventsOfDeferentTimeSlots =
+      this.countEventsInSameSlotRanges(scheduledEvents);
 
-    return scheduleEventWithCount.map((event) => ({
+    return eventsOfDeferentTimeSlots.map((event) => ({
       ...event,
       startTime: new Date(event.startTime).toLocaleString(),
       endTime: new Date(event.endTime).toLocaleString(),
     }));
   }
 
-  countEqualAmountOfTimeRanges(scheduledEvent: ScheduledEventsDto[]) {
-    scheduledEvent.sort(
-      (a, b) => a.startTime.getTime() - b.startTime.getTime(),
-    );
-
-    const countedEvents: ScheduledEventsDto[] = [];
-    while (scheduledEvent.length > 0) {
-      const firstElement = scheduledEvent.shift();
-      if (countedEvents.length == 0) {
-        //this for first element of counted array
-        firstElement.availableQuantity++;
-        countedEvents.push(firstElement);
-        continue;
-      }
-      const lastCountedEvent = countedEvents[countedEvents.length - 1];
-      if (
-        //this for exactly equal element of counted array
-        lastCountedEvent.startTime.toISOString() ==
-          firstElement.startTime.toISOString() &&
-        lastCountedEvent.endTime.toISOString() ==
-          firstElement.endTime.toISOString()
-      ) {
-        lastCountedEvent.availableQuantity++;
-        continue;
-      }
-
-      const exMoment = extendMoment(moment);
-      const rangeOne = exMoment.range(
-        firstElement.startTime,
-        firstElement.endTime,
-      );
-      const rangeTwo = exMoment.range(
-        lastCountedEvent.startTime,
-        lastCountedEvent.endTime,
-      );
-      if (rangeOne.overlaps(rangeTwo)) {
-        //this for overlap element of counted array
-        //here overlap means last conted item start, end date and first item in sorted array is not exactly the same
-        //so we cant remove one event. so here substract maximum count by one and add both event.
-        lastCountedEvent.availableQuantity++;
-        lastCountedEvent.maximumPeopleCanBookEvent--;
-        firstElement.availableQuantity = lastCountedEvent.availableQuantity;
-        firstElement.maximumPeopleCanBookEvent =
-          lastCountedEvent.maximumPeopleCanBookEvent;
-        countedEvents.push(firstElement);
+  countEventsInSameSlotRanges(
+    scheduledEvents: ScheduledEventsDto[],
+  ): ScheduledEventsDto[] {
+    const scheduledTimeObj = {};
+    scheduledEvents.forEach((event) => {
+      const startTime = event.startTime.toISOString();
+      const endTime = event.endTime.toISOString();
+      const existEvent = scheduledTimeObj[startTime.concat(endTime)];
+      if (existEvent) {
+        existEvent.countPerSlot++;
       } else {
-        //this for non overlap element of counted array
-        firstElement.availableQuantity++;
-        countedEvents.push(firstElement);
+        event.countPerSlot++;
+        scheduledTimeObj[startTime.concat(endTime)] = event;
       }
-    }
-    return countedEvents;
+    });
+
+    return Object.values(scheduledTimeObj);
   }
 
-  splitEventsIntoSlotLengths(
-    scheduledEvents: ScheduledEventsDto[],
-    slotLengthInMunute: number,
+  async getAllAppoinmentInMaximumTimeRange(
+    maximumAppoinmentDates: number,
+    eventId: number,
+    fromDate: Date,
   ) {
-    const splittedEventArray = scheduledEvents.map((event) =>
-      this.splitsliptSingleExceesScheduleSplit(event, slotLengthInMunute),
+    const currentTimestamp = fromDate;
+    const currentLastDayForAppoinment = addDays(
+      Date.now(),
+      maximumAppoinmentDates,
     );
 
-    return this.flattenArray(splittedEventArray);
+    return this.appoinmentRepo.find({
+      where: {
+        startTime: MoreThanOrEqual(currentTimestamp),
+        endTime: LessThanOrEqual(currentLastDayForAppoinment),
+        eventType: { id: eventId },
+      },
+      relations: ['eventType'],
+      select: ['startTime', 'endTime', 'eventType'],
+    });
   }
 
   /**
@@ -219,17 +377,12 @@ export class UserAppoinmentService {
 
   getScheduledEventsFormat(
     oppinements: AppoinmentEntity[],
-    maxParallelBookings: number,
   ): ScheduledEventsDto[] {
     return oppinements.map((event) => ({
-      firstName: event.user?.firstName,
-      lastName: event.user?.lastNname,
       startTime: event.startTime,
       endTime: event.endTime,
       eventType: event.eventType?.eventTypeName,
-      gender: event.user?.gender,
-      maximumPeopleCanBookEvent: maxParallelBookings,
-      availableQuantity: 0,
+      countPerSlot: 0,
     }));
   }
 
@@ -269,14 +422,14 @@ export class UserAppoinmentService {
         startTime,
       );
 
-    const overLapIntervals = unavailableDaysOfSelectedDay.filter((t) => {
-      const selectedDateStr = new Date(startTime).toLocaleDateString();
-      const unavailFrom = new Date(
-        selectedDateStr.concat(' ').concat(t.startTime),
-      );
-      const unavailTo = new Date(selectedDateStr.concat(' ').concat(t.endTime));
+    const nonOverLapUnavailDays = this.findOverlapsOnUnavailableTimes(
+      unavailableDaysOfSelectedDay,
+      startTime,
+    );
+
+    const overLapIntervals = nonOverLapUnavailDays.filter((t) => {
       return areIntervalsOverlapping(
-        { start: unavailFrom, end: unavailTo },
+        { start: t.startTime, end: t.endTime },
         { start: startTime, end: endTime },
       );
     });
@@ -316,7 +469,7 @@ export class UserAppoinmentService {
     const selectedDay = days[getDay(selectedDate)];
     return unavaialbleTimes.filter((t) => {
       const unAvailDate = t.date && new Date(t.date).setUTCHours(0, 0, 0, 0);
-      const currentDate = new Date().setUTCHours(0, 0, 0, 0);
+      const currentDate = new Date(selectedDate).setUTCHours(0, 0, 0, 0);
       return (
         t.durationType === selectedDay ||
         t.durationType === TimeDurationType.ALL_DAYS ||
@@ -324,6 +477,61 @@ export class UserAppoinmentService {
           unAvailDate === currentDate)
       );
     });
+  }
+
+  findOverlapsOnUnavailableTimes(
+    unavaialbleTimes: UnavailableTimesEntity[],
+    selectedTime: Date,
+  ): { startTime: Date; endTime: Date }[] {
+    if (unavaialbleTimes.length === 0) return [];
+
+    const dateOfSelectedTime = selectedTime.toLocaleDateString();
+    const unavailTimes = unavaialbleTimes.map((time) => ({
+      startTime: new Date(
+        dateOfSelectedTime.concat(' ').concat(time.startTime),
+      ),
+      endTime: new Date(dateOfSelectedTime.concat(' ').concat(time.endTime)),
+    }));
+    unavailTimes.sort((t1, t2) => compareAsc(t1.startTime, t2.startTime));
+
+    let fistTime = unavailTimes.shift();
+    let searchedItems = 0;
+    const newUnAvailableTimes = [];
+    while (unavailTimes.length > 0) {
+      const nextUvTime = unavailTimes[searchedItems];
+      if (!nextUvTime) {
+        newUnAvailableTimes.push(fistTime);
+        return newUnAvailableTimes;
+      } else if (
+        areIntervalsOverlapping(
+          { start: fistTime.startTime, end: fistTime.endTime },
+          { start: nextUvTime.startTime, end: nextUvTime.endTime },
+        )
+      ) {
+        const newTime = {
+          startTime:
+            fistTime.startTime > nextUvTime.startTime
+              ? nextUvTime.startTime
+              : fistTime.startTime,
+          endTime:
+            fistTime.endTime > nextUvTime.endTime
+              ? fistTime.endTime
+              : nextUvTime.endTime,
+        };
+        fistTime = newTime;
+        searchedItems++;
+      } else {
+        newUnAvailableTimes.push(fistTime);
+        fistTime = unavailTimes.shift();
+        searchedItems = 0;
+
+        if (unavailTimes.length === 0) {
+          newUnAvailableTimes.push(nextUvTime);
+        }
+      }
+    }
+
+    return newUnAvailableTimes;
   }
 
   /**
@@ -338,7 +546,7 @@ export class UserAppoinmentService {
     const globalConfig = await this.getEventConfig(eventId);
     const maximumApponmentDate = addDays(
       Date.now(),
-      globalConfig.maximumAppinmentDates,
+      globalConfig.maximumAppoinmentDates,
     );
     const currentDate = new Date();
 
@@ -449,10 +657,10 @@ export class UserAppoinmentService {
   }
 
   findNearestDateOfDates(dates: Date[], comparativeDate: Date) {
-    const sortedDates = dates.sort(compareAsc);
+    dates.sort(compareAsc);
     let dateDiffInMinute = Infinity;
-    let lastNearestDate: Date = null;
-    for (const date of sortedDates) {
+    let lastNearestDate: Date = dates[0];
+    for (const date of dates) {
       const timeDiff = differenceInMinutes(comparativeDate, date);
       if (timeDiff >= 0 && dateDiffInMinute > timeDiff) {
         dateDiffInMinute = timeDiff;
@@ -479,7 +687,7 @@ export class UserAppoinmentService {
       },
     });
 
-    if (currentAvailableAppoinments.length > eventConfig.maxParallelClients) {
+    if (currentAvailableAppoinments.length >= eventConfig.maxParallelClients) {
       throw new HttpException(
         {
           message: [`maximum appoinemts are filled for this slot`],

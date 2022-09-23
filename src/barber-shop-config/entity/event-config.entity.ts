@@ -24,8 +24,8 @@ export class EventConfigEntity {
   @Column({ name: 'break_between_appoinment_in_minute' })
   breakBetweenAppoinmentInMinute: number;
 
-  @Column({ name: 'maximum_appinment_dates' })
-  maximumAppinmentDates: number;
+  @Column({ name: 'maximum_appoinment_dates' })
+  maximumAppoinmentDates: number;
 
   @VersionColumn()
   version: number;
