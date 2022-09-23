@@ -22,7 +22,7 @@ import {
   getDay,
 } from 'date-fns';
 import { TimeRange } from './types/time-range.type';
-import { TimeDurationType } from 'src/barber-shop-config/enum/time-duration-type.enum';
+import { TimeDurationType } from '../barber-shop-config/enum/time-duration-type.enum';
 //over book events
 //change global configuration for the specific event type
 //validation for pre-unavailable dates do not work
