@@ -116,7 +116,7 @@ describe('BarberShopConfigService', () => {
         },
       } as AppoinmentDto;
 
-      expect(service.createUserAppoinement(appoinment)).rejects.toThrow(
+      await expect(service.createUserAppoinement(appoinment)).rejects.toThrow(
         'Http Exception',
       );
     });
